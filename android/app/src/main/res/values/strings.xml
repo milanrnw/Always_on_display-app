@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_service_description">Artful AOD requires this permission to know when the screen is locked to show the Always-On Display.</string>
+</resources>

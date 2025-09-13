@@ -1,12 +1,14 @@
-// lib/presentation/screens/home_screen.dart
-
-import 'package:file_picker/file_picker.dart';
+import 'dart:io';
+import 'dart:convert'; // Make sure this import is here
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:shared_preferences/shared_preferences.dart'; // NEW: Import shared_preferences
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:path/path.dart' as p;
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -16,121 +18,102 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  static const platform = MethodChannel('com.artfulaod.service');
+  static const platform = MethodChannel('com.artfulaod.settings');
 
-  bool _isAodServiceEnabled = false;
   int _selectedImageCount = 0;
   double _updateFrequencyInMinutes = 5;
   List<XFile> _selectedImages = [];
+  bool _isServiceEnabled = false;
 
   @override
   void initState() {
     super.initState();
-    // NEW: Load saved settings when the app starts
+    WidgetsBinding.instance.addPostFrameCallback((_) => _checkServiceStatus());
     _loadSettings();
   }
 
-  // --- NEW: Method to save all current settings to the device ---
-  Future<void> _saveSettings() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('aod_enabled', _isAodServiceEnabled);
-    await prefs.setDouble('update_frequency', _updateFrequencyInMinutes);
-    // We store the list of image paths as a List<String>
-    final imagePaths = _selectedImages.map((file) => file.path).toList();
-    await prefs.setStringList('image_paths', imagePaths);
-    print('Settings Saved!');
+  Future<void> _checkServiceStatus() async {
+    try {
+      final bool isEnabled =
+          await platform.invokeMethod('isAccessibilityServiceEnabled');
+      if (mounted) {
+        setState(() {
+          _isServiceEnabled = isEnabled;
+        });
+      }
+    } on PlatformException catch (e) {
+      print("Failed to check service status: '${e.message}'.");
+    }
   }
 
-  // --- NEW: Method to load settings from the device ---
+  Future<void> _saveSettings(
+      {String? imageData, List<String>? imagePaths}) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+        'update_frequency', _updateFrequencyInMinutes.toString());
+
+    if (imageData != null) {
+      await prefs.setString('image_data_base64', imageData);
+      await prefs.remove('image_paths');
+      print('Settings Saved with SINGLE IMAGE DATA!');
+    } else if (imagePaths != null) {
+      await prefs.setStringList('image_paths', imagePaths);
+      await prefs.remove('image_data_base64');
+      print('Settings Saved with MULTIPLE IMAGE PATHS!');
+    }
+  }
+
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
+    // For this test, we don't need to load the image data back into the UI,
+    // just the paths for the counter.
+    final imagePaths = prefs.getStringList('image_paths') ?? [];
     setState(() {
-      _isAodServiceEnabled = prefs.getBool('aod_enabled') ?? false;
-      _updateFrequencyInMinutes = prefs.getDouble('update_frequency') ?? 5.0;
-      final imagePaths = prefs.getStringList('image_paths') ?? [];
+      _updateFrequencyInMinutes =
+          double.parse(prefs.getString('update_frequency') ?? '5.0');
       _selectedImages = imagePaths.map((path) => XFile(path)).toList();
       _selectedImageCount = _selectedImages.length;
     });
     print('Settings Loaded!');
   }
 
-  // --- MODIFIED: This now saves state and passes data to the service ---
-  // In home_screen.dart
+  Future<void> _requestPermissionsAndPickImages() async {
+    await Permission.manageExternalStorage.request();
+    final imageStatus = await Permission.photos.request();
+    if (!imageStatus.isGranted) return;
 
-  Future<void> _onToggleAodService(bool newValue) async {
-    setState(() {
-      _isAodServiceEnabled = newValue;
-    });
-    await _saveSettings();
+    FilePickerResult? result = await FilePicker.platform.pickFiles(
+      allowMultiple: true,
+      type: FileType.image,
+    );
 
-    if (_isAodServiceEnabled) {
-      // 1. Check for Draw Over Apps permission
-      var alertStatus = await Permission.systemAlertWindow.request();
-      if (!alertStatus.isGranted) {
-        print("Draw over other apps permission denied.");
-        setState(() {
-          _isAodServiceEnabled = false;
-        });
-        return;
-      }
+    if (result != null && result.paths.isNotEmpty) {
+      final String? firstImagePath = result.paths.first;
+      if (firstImagePath == null) return;
 
-      // NEW: 2. Check for Notification permission (required for Foreground Service)
-      var notificationStatus = await Permission.notification.request();
-      if (!notificationStatus.isGranted) {
-        print("Notification permission denied.");
-        setState(() {
-          _isAodServiceEnabled = false;
-        });
-        return;
-      }
+      final imageBytes = await File(firstImagePath).readAsBytes();
+      final String base64Image = base64Encode(imageBytes);
 
-      // 3. Start the service
-      try {
-        final Map<String, dynamic> settings = {
-          'imagePaths': _selectedImages.map((f) => f.path).toList(),
-          'frequency': _updateFrequencyInMinutes.toInt(),
-        };
-        final String result =
-            await platform.invokeMethod('startService', settings);
-        print(result);
-      } on PlatformException catch (e) {
-        print("Failed to start service: '${e.message}'.");
-      }
-    } else {
-      try {
-        final String result = await platform.invokeMethod('stopService');
-        print(result);
-      } on PlatformException catch (e) {
-        print("Failed to stop service: '${e.message}'.");
-      }
-    }
-  }
+      await _saveSettings(imageData: base64Image);
 
-  // --- MODIFIED: This now saves state after picking images ---
-  Future<void> _pickImages() async {
-    final status = await Permission.photos.request();
-    if (!status.isGranted) {
-      return;
-    }
-
-    FilePickerResult? result = await FilePicker.platform
-        .pickFiles(allowMultiple: true, type: FileType.image);
-
-    if (result != null) {
-      final List<XFile> newImages = result.paths
-          .where((path) => path != null)
-          .map((path) => XFile(path!))
-          .toList();
       setState(() {
-        _selectedImages = newImages;
-        _selectedImageCount = newImages.length;
+        _selectedImages =
+            result.paths.where((p) => p != null).map((p) => XFile(p!)).toList();
+        _selectedImageCount = _selectedImages.length;
       });
-      // NEW: Save settings every time the images change
-      await _saveSettings();
     }
   }
 
-  // --- (The rest of the file is UI and remains the same) ---
+  // --- UNMODIFIED CODE BELOW (EXCEPT FOR THE ONE LINE FIX) ---
+
+  Future<void> _openAccessibilitySettings() async {
+    try {
+      await platform.invokeMethod('openAccessibilitySettings');
+    } on PlatformException catch (e) {
+      print("Failed to open accessibility settings: '${e.message}'.");
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -145,7 +128,7 @@ class _HomeScreenState extends State<HomeScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16.0),
         children: [
-          _buildServiceToggleCard(),
+          _buildActivationCard(),
           const SizedBox(height: 24),
           _buildSectionHeader('Configuration'),
           const SizedBox(height: 12),
@@ -155,26 +138,48 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildServiceToggleCard() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      decoration: BoxDecoration(
-          color: const Color(0xFF1E1E1E),
-          borderRadius: BorderRadius.circular(12)),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Text('Enable AOD Service',
-              style: GoogleFonts.lato(
-                  color: Colors.white,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w500)),
-          Switch(
-            value: _isAodServiceEnabled,
-            onChanged: _onToggleAodService,
-            activeColor: Colors.deepPurpleAccent,
-          ),
-        ],
+  Widget _buildActivationCard() {
+    return Card(
+      color: _isServiceEnabled
+          ? const Color(0xFF1E1E1E)
+          : Colors.red[900]?.withOpacity(0.5),
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('AOD Service',
+                style: GoogleFonts.lato(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            Text(
+                _isServiceEnabled
+                    ? 'The Artful AOD service is active and will show when you lock your screen.'
+                    : 'To use Artful AOD, you must enable its Accessibility Service in system settings. This allows the app to know when your screen is locked.',
+                style: GoogleFonts.lato(color: Colors.grey.shade300)),
+            const SizedBox(height: 16),
+            ElevatedButton(
+              onPressed: _openAccessibilitySettings,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _isServiceEnabled
+                    ? Colors.grey[700]
+                    : Colors.deepPurpleAccent,
+              ),
+              child: Text(
+                  _isServiceEnabled ? 'Disable in Settings' : 'Enable Service'),
+            ),
+            Padding(
+              padding: const EdgeInsets.only(top: 8.0),
+              child: TextButton.icon(
+                onPressed: _checkServiceStatus,
+                icon: const Icon(Icons.refresh, size: 16),
+                label: const Text("Refresh Status"),
+              ),
+            )
+          ],
+        ),
       ),
     );
   }
@@ -189,6 +194,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  // --- THIS IS THE ONLY WIDGET YOU NEED TO REPLACE ---
   Widget _buildConfigurationCard() {
     return Container(
       padding: const EdgeInsets.all(16),
@@ -203,7 +209,7 @@ class _HomeScreenState extends State<HomeScreen> {
             subtitle: _selectedImageCount == 0
                 ? 'No images selected'
                 : '$_selectedImageCount images selected',
-            onTap: _pickImages,
+            onTap: _requestPermissionsAndPickImages,
           ),
           const Divider(color: Colors.grey),
           Padding(
@@ -229,9 +235,12 @@ class _HomeScreenState extends State<HomeScreen> {
                       _updateFrequencyInMinutes = value;
                     });
                   },
-                  // NEW: Save settings when the user stops sliding
-                  onChangeEnd: (double value) {
-                    _saveSettings();
+                  // --- THE FINAL FIX IS HERE ---
+                  // This now ONLY saves the frequency, it cannot erase the image data.
+                  onChangeEnd: (double value) async {
+                    final prefs = await SharedPreferences.getInstance();
+                    await prefs.setString('update_frequency', value.toString());
+                    print('Frequency Updated!');
                   },
                 ),
               ],

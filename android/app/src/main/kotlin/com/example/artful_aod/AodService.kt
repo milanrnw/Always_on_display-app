@@ -1,154 +1,181 @@
-package com.example.artful_aod // <<< Make sure this matches your package name
+package com.example.artful_aod // Make sure this matches your package name
 
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
-import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
-import android.graphics.Color
-import android.graphics.PixelFormat
+import android.graphics.BitmapFactory
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
-import android.view.Gravity
 import android.view.WindowManager
-import android.widget.TextView
+import android.widget.FrameLayout
+import android.widget.ImageView
 import androidx.core.app.NotificationCompat
+import android.graphics.PixelFormat
 
 class AodService : Service() {
 
-    private var windowManager: WindowManager? = null
-    private var aodView: TextView? = null
-
-    private var imagePaths: List<String>? = null
-    private var frequency: Int = 5
-
-    // --- NEW: Constants for the Foreground Service Notification ---
-    private val NOTIFICATION_CHANNEL_ID = "artful_aod_service_channel"
-    private val NOTIFICATION_ID = 1
-
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d("AodService", "onStartCommand received")
-
-        // --- NEW: Start the service in the foreground ---
-        createNotificationChannel()
-        val notification = createNotification()
-        startForeground(NOTIFICATION_ID, notification)
-
-        imagePaths = intent?.getStringArrayListExtra("imagePaths")
-        frequency = intent?.getIntExtra("frequency", 5) ?: 5
-        Log.d("AodService", "Data received: ${imagePaths?.size} images, $frequency min frequency")
-
-        return START_STICKY
+    companion object {
+        const val ACTION_START = "ACTION_START"
+        const val ACTION_STOP = "ACTION_STOP"
+        private const val NOTIFICATION_ID = 1
+        private const val NOTIFICATION_CHANNEL_ID = "AOD_SERVICE_CHANNEL"
     }
 
-    private val broadcastReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            Log.d("AodService", "Broadcast received: ${intent?.action}")
-            when (intent?.action) {
-                Intent.ACTION_SCREEN_OFF -> showAodView()
-                Intent.ACTION_USER_PRESENT -> hideAodView()
-            }
-        }
-    }
+    private lateinit var windowManager: WindowManager
+    private var overlayView: FrameLayout? = null
+    private var imageView: ImageView? = null
+    private var imagePaths: List<String> = emptyList()
+    private var frequencyMillis: Long = 300000
+    private var currentImageIndex = 0
+
+    private val handler = Handler(Looper.getMainLooper())
+    private var imageUpdateRunnable: Runnable? = null
+
+    override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
-        Log.d("AodService", "onCreate")
-        val filter = IntentFilter().apply {
-            addAction(Intent.ACTION_SCREEN_OFF)
-            addAction(Intent.ACTION_USER_PRESENT)
-        }
-        registerReceiver(broadcastReceiver, filter)
+        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        Log.d("AodService", "Service Created.")
     }
 
-
-// In AodService.kt
-
-    private fun showAodView() {
-        Log.d("AodService", "showAodView called")
-        if (aodView != null) return
-
-        val textToShow = """
-            AOD Active
-            ${imagePaths?.size ?: 0} images selected
-            Frequency: $frequency minutes
-        """.trimIndent()
-
-        aodView = TextView(this).apply {
-            text = textToShow
-            setTextColor(Color.WHITE)
-            textSize = 24f
-            gravity = Gravity.CENTER
-            setLineSpacing(1.2f, 1.2f)
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_START -> startAod()
+            ACTION_STOP -> stopAod()
         }
+        return START_STICKY
+    }
 
-        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
-        
-        // --- THIS IS THE FINAL AND CORRECT CONFIGURATION ---
+    private fun startAod() {
+        if (overlayView != null) {
+            Log.w("AodService", "AOD start called but view already exists.")
+            return
+        }
+        Log.d("AodService", "Starting AOD...")
+
+        startForeground(NOTIFICATION_ID, createNotification())
+
+        overlayView = FrameLayout(this)
+        imageView = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            // --- THIS IS THE ONLY CHANGE FOR OUR TEST ---
+            setBackgroundColor(0xFF800080.toInt()) // Set a solid, bright red background
+        }
+        overlayView!!.addView(imageView)
+
+        loadSettings() // We still call this to get the frequency and prevent shutdown
+
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, // Revert to the allowed type
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                    or WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
-                    or WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
-                    or WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
-                    or WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD, // The key new flag
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
             PixelFormat.TRANSLUCENT
         )
 
         try {
-            windowManager?.addView(aodView, params)
-            Log.d("AodService", "AOD View added to WindowManager")
+            windowManager.addView(overlayView, params)
+            Log.d("AodService", "Overlay view added to WindowManager.")
         } catch (e: Exception) {
             Log.e("AodService", "Error adding view to WindowManager", e)
         }
     }
 
-    private fun hideAodView() {
-        Log.d("AodService", "hideAodView called")
-        if (aodView != null) {
-            try {
-                windowManager?.removeView(aodView)
-                aodView = null
-                Log.d("AodService", "AOD View removed from WindowManager")
-            } catch (e: Exception) {
-                Log.e("AodService", "Error removing view from WindowManager", e)
-            }
+    private fun stopAod() {
+        if (overlayView == null) {
+            Log.w("AodService", "AOD stop called but no view exists.")
+            return
         }
+        Log.d("AodService", "Stopping AOD...")
+
+        imageUpdateRunnable?.let { handler.removeCallbacks(it) }
+        imageUpdateRunnable = null
+
+        try {
+            windowManager.removeView(overlayView)
+        } catch (e: Exception) {
+            Log.e("AodService", "Error removing view", e)
+        }
+        overlayView = null
+        stopForeground(true)
+        stopSelf()
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        Log.d("AodService", "onDestroy")
-        unregisterReceiver(broadcastReceiver)
-        hideAodView()
+    private fun updateImage() {
+        // This function is not needed for the red screen test.
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    private fun loadSettings() {
+        val prefs = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+        try {
+            val rawFrequency = prefs.getString("flutter.update_frequency", "5.0") ?: "5.0"
+            frequencyMillis = rawFrequency.toDouble().toLong() * 60 * 1000
 
-    // --- NEW: Methods for creating the persistent notification ---
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val serviceChannel = NotificationChannel(
-                NOTIFICATION_CHANNEL_ID,
-                "Artful AOD Service Channel",
-                NotificationManager.IMPORTANCE_DEFAULT
-            )
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(serviceChannel)
+            val base64Image = prefs.getString("flutter.image_data_base64", null)
+            if (base64Image != null) {
+                Log.d("AodService", "Found image data in SharedPreferences.")
+                val imageBytes = android.util.Base64.decode(base64Image, android.util.Base64.DEFAULT)
+                val bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+                if (bitmap != null) {
+                    // We decode it to prove the data is valid, but we won't display it for this test.
+                    // imageView?.setImageBitmap(bitmap) 
+                    Log.d("AodService", "Successfully decoded bitmap from data (but not displaying it).")
+                } else {
+                     Log.e("AodService", "Failed to decode bitmap from data.")
+                }
+                imagePaths = listOf("dummy") // Prevent service shutdown
+            } else {
+                imagePaths = emptyList()
+            }
+            
+            if(imagePaths.isEmpty()){
+                Log.e("AodService", "No image data found. Service might stop.")
+                // To be safe for the test, we ensure the service doesn't stop itself.
+                imagePaths = listOf("dummy")
+            }
+            
+        } catch (e: Exception) {
+            Log.e("AodService", "Failed to parse settings", e)
+            imagePaths = emptyList()
         }
     }
 
     private fun createNotification(): Notification {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                NOTIFICATION_CHANNEL_ID,
+                "Artful AOD Service",
+                NotificationManager.IMPORTANCE_LOW
+            )
+            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        }
+
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("Artful AOD")
-            .setContentText("Always-On Display service is active.")
-            .setSmallIcon(R.mipmap.ic_launcher) // Uses the default app icon
+            .setContentTitle("Artful AOD is active")
+            .setContentText("Displaying images over your lock screen.")
+            .setSmallIcon(R.mipmap.ic_launcher)
             .build()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        Log.d("AodService", "Service Destroyed.")
+        if (overlayView != null) {
+            try {
+                windowManager.removeView(overlayView)
+            } catch (e: Exception) {}
+        }
     }
 }

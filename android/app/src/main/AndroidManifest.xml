@@ -1,21 +1,23 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
-    <!-- NEW: Permission to draw over the lock screen -->
+    <!-- Permissions for drawing overlays and running in the background -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
-    <!-- NEW: Permission to run a service in the foreground (required for long-running tasks) -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
-    <!-- NEW: Permission to start the service when the phone boots up (optional but good) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+
+    <!-- Optional: To start the service on boot -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    
+
+    <!-- Permissions for reading images -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
 
     <application
         android:label="artful_aod"
         android:name="${applicationName}"
+        android:requestLegacyExternalStorage="true"
         android:icon="@mipmap/ic_launcher">
-                <!-- REPLACE THE ENTIRE ACTIVITY BLOCK WITH THIS ONE -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -33,13 +35,24 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
-        
-        <!-- NEW: Declare our AOD background service -->
+
+        <!-- NEW: Our Foreground Service for displaying the AOD -->
+        <service android:name=".AodService" />
+
+        <!-- NEW: Our Accessibility Service for detecting the lock screen -->
         <service
-            android:name=".AodService"
-            android:enabled="true"
-            android:exported="false" />
-            
+            android:name=".AodAccessibilityService"
+            android:exported="true"
+            android:label="Artful AOD Service"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
