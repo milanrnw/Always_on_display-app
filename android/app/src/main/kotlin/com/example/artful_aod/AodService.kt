@@ -30,12 +30,7 @@ class AodService : Service() {
     private lateinit var windowManager: WindowManager
     private var overlayView: FrameLayout? = null
     private var imageView: ImageView? = null
-    private var imagePaths: List<String> = emptyList()
-    private var frequencyMillis: Long = 300000
-    private var currentImageIndex = 0
-
-    private val handler = Handler(Looper.getMainLooper())
-    private var imageUpdateRunnable: Runnable? = null
+    private var hasContent: Boolean = false // To track if we have an image
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -62,15 +57,23 @@ class AodService : Service() {
 
         startForeground(NOTIFICATION_ID, createNotification())
 
+        // Create the view first
         overlayView = FrameLayout(this)
         imageView = ImageView(this).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
-            // --- THIS IS THE ONLY CHANGE FOR OUR TEST ---
-            setBackgroundColor(0xFF800080.toInt()) // Set a solid, bright red background
+            // The red background is now REMOVED
         }
         overlayView!!.addView(imageView)
 
-        loadSettings() // We still call this to get the frequency and prevent shutdown
+        // Now load the settings and apply the image
+        loadSettingsAndApplyImage()
+        
+        // If we failed to load any content, don't show the window.
+        if (!hasContent) {
+            Log.e("AodService", "No image content found. Stopping service.")
+            stopSelf()
+            return
+        }
 
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -100,9 +103,6 @@ class AodService : Service() {
         }
         Log.d("AodService", "Stopping AOD...")
 
-        imageUpdateRunnable?.let { handler.removeCallbacks(it) }
-        imageUpdateRunnable = null
-
         try {
             windowManager.removeView(overlayView)
         } catch (e: Exception) {
@@ -113,42 +113,28 @@ class AodService : Service() {
         stopSelf()
     }
 
-    private fun updateImage() {
-        // This function is not needed for the red screen test.
-    }
-
-    private fun loadSettings() {
+    private fun loadSettingsAndApplyImage() {
         val prefs = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+        hasContent = false // Reset status
         try {
-            val rawFrequency = prefs.getString("flutter.update_frequency", "5.0") ?: "5.0"
-            frequencyMillis = rawFrequency.toDouble().toLong() * 60 * 1000
-
             val base64Image = prefs.getString("flutter.image_data_base64", null)
             if (base64Image != null) {
-                Log.d("AodService", "Found image data in SharedPreferences.")
+                Log.d("AodService", "Found image data in SharedPreferences. Decoding...")
                 val imageBytes = android.util.Base64.decode(base64Image, android.util.Base64.DEFAULT)
                 val bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
                 if (bitmap != null) {
-                    // We decode it to prove the data is valid, but we won't display it for this test.
-                    // imageView?.setImageBitmap(bitmap) 
-                    Log.d("AodService", "Successfully decoded bitmap from data (but not displaying it).")
+                    // --- THIS LINE IS NOW ACTIVE ---
+                    imageView?.setImageBitmap(bitmap)
+                    hasContent = true // We have a valid image!
+                    Log.d("AodService", "Successfully decoded AND SET bitmap from data!")
                 } else {
                      Log.e("AodService", "Failed to decode bitmap from data.")
                 }
-                imagePaths = listOf("dummy") // Prevent service shutdown
             } else {
-                imagePaths = emptyList()
+                 Log.e("AodService", "No image data found in SharedPreferences.")
             }
-            
-            if(imagePaths.isEmpty()){
-                Log.e("AodService", "No image data found. Service might stop.")
-                // To be safe for the test, we ensure the service doesn't stop itself.
-                imagePaths = listOf("dummy")
-            }
-            
         } catch (e: Exception) {
-            Log.e("AodService", "Failed to parse settings", e)
-            imagePaths = emptyList()
+            Log.e("AodService", "Failed to parse settings or decode bitmap", e)
         }
     }
 
